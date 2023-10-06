@@ -1,0 +1,85 @@
+import os
+import re
+import tempfile
+from email import policy
+from email.parser import BytesParser
+from urllib.parse import urlparse, parse_qs
+import cv2
+
+def extract_urls_from_text(text):
+    url_pattern = re.compile(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+')
+    return url_pattern.findall(text)
+
+def extract_original_url(safelink_url):
+    parsed_url = urlparse(safelink_url)
+    query_params = parse_qs(parsed_url.query)
+    return query_params.get('url', [None])[0]
+
+def process_eml_file(file_path):
+    images = []
+    with open(file_path, 'rb') as f:
+        msg = BytesParser(policy=policy.default).parse(f)
+        subject = msg.get('subject', 'No Subject')
+        extracted_urls = []
+        
+        if msg.is_multipart():
+            for part in msg.iter_attachments():
+                content_type = part.get_content_type()
+                if content_type.startswith("image/"):
+                    image_data = part.get_payload(decode=True)
+                    # Generate a temporary filename for the image
+                    image_filename = os.path.join(tempfile.gettempdir(), f"temp_{os.urandom(8).hex()}.png")
+                    with open(image_filename, 'wb') as img_file:
+                        img_file.write(image_data)
+                    images.append(image_filename)
+        else:
+            text = msg.get_payload(decode=True)
+            urls = extract_urls_from_text(text.decode('utf-8', errors='ignore'))
+            for url in urls:
+                if 'safelinks.protection.outlook.com' in url:
+                    original_url = extract_original_url(url)
+                    if original_url:
+                        extracted_urls.append(original_url)
+                else:
+                    extracted_urls.append(url)
+        
+        return subject, extracted_urls, images
+
+def decode_qr_from_file(file_path):
+    image = cv2.imread(file_path)
+    qr_decoder = cv2.QRCodeDetector()
+    val, pts, qr_code = qr_decoder.detectAndDecode(image)
+    return val if val else None
+
+def main():
+    eml_files = [f for f in os.listdir() if f.endswith('.eml')]
+    
+    if not eml_files:
+        print("No .eml files found in the current directory.")
+        return
+
+    for file in eml_files:
+        subject, urls, image_files = process_eml_file(file)
+        if urls:
+            print(f"\nEmail Subject: {subject}")
+            for idx, url in enumerate(urls, start=1):
+                print(f"{idx}. {url}")
+
+    print("\n" + "*"*20 + "QR" + "*"*20)
+    print("*"*20 + "Results" + "*"*20 + "\n")
+    qr_count = 0
+    for file in eml_files:
+        _, _, image_files = process_eml_file(file)
+        for image_file in image_files:
+            detected_qr = decode_qr_from_file(image_file)
+            if detected_qr:
+                qr_count += 1
+                print(f"QR Detected in {file}: {detected_qr}")
+            # Remove the temporary image file after processing
+            os.remove(image_file)
+    
+    if qr_count == 0:
+        print("No QR codes detected in the provided .eml files.")
+
+if __name__ == "__main__":
+    main()
